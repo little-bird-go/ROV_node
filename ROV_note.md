@@ -947,6 +947,7 @@ void Sub::init_rc_in()
 ```cpp
 // 在 init_ardupilot() 中调用 init_rc_out()
 // 对水下机器人的推进器结构进行了初始化
+// 默认是 SUB_FRAME_VECTORED 在 parameter.cpp 中定义
 
 void Sub::init_rc_out()
 {
@@ -977,7 +978,50 @@ motors_output();
 
 ###### 自定义推进器结构
 
+```cpp
+// 1. 在 AP_MotorsDOF.h 中 sub_frame_t 中添加自定义的 推进器结构名 
+// Supported frame types
+typedef enum {
+    SUB_FRAME_BLUEROV1,
+    SUB_FRAME_VECTORED,
+    SUB_FRAME_VECTORED_6DOF,
+    SUB_FRAME_VECTORED_6DOF_90DEG,
+    SUB_FRAME_SIMPLEROV_3,
+    SUB_FRAME_SIMPLEROV_4,
+    SUB_FRAME_SIMPLEROV_5,
+    SUB_FRAME_CUSTOM
+} sub_frame_t;
 
+// 2. 在 AP_MotorsDOF.app 中 setup_motors() 中添加对应的 case 并 调用 add_motor_raw_6dof() 添加电机
 
+```
 
+#### 水下机器人控制模式
 
+`sub`中默认的控制模式是 `MANNUAL`模式
+
+```cpp
+// 在 sub.cpp 中
+// sub 类初始化
+control_mode(MANUAL),
+```
+
+在源码中一共定义了10种控制模式
+
+```cpp
+// 在 define.h 中
+enum control_mode_t : uint8_t {
+    STABILIZE =     0,  // manual angle with manual depth/throttle
+    ACRO =          1,  // manual body-frame angular rate with manual depth/throttle
+    ALT_HOLD =      2,  // manual angle with automatic depth/throttle
+    AUTO =          3,  // fully automatic waypoint control using mission commands
+    GUIDED =        4,  // fully automatic fly to coordinate or fly at velocity/direction using GCS immediate commands
+    CIRCLE =        7,  // automatic circular flight with automatic throttle
+    SURFACE =       9,  // automatically return to surface, pilot maintains horizontal control
+    POSHOLD =      16,  // automatic position hold with manual override, with automatic throttle
+    MANUAL =       19,  // Pass-through input with no stabilization
+    MOTOR_DETECT = 20   // Automatically detect motors orientation
+};
+```
+
+##### 模式控制流程
