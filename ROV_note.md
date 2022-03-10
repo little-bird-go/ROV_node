@@ -1025,3 +1025,189 @@ enum control_mode_t : uint8_t {
 ```
 
 ##### 模式控制流程
+
+###### 模式初始化
+
+在程序启动，初始化阶段，控制模式初始化为默认的`MANUAL`模式
+
+###### 模式更新
+
+官方源码中，通过手柄的按键来选择水下机器人的控制模式。
+
+函数的调用流程如下所示
+
+```cpp
+// 1. scheduler_tasks[]中注册了GCS 的消息接收更新线程
+SCHED_TASK_CLASS(GCS,                 (GCS*)&sub._gcs,   update_receive,     400, 180,  36)
+    
+// 2. update_receive()函数对接收的数据进行mavlink包判定
+// 如果是完整的包则调用 packetReceived() 
+if (mavlink_parse_char(chan, c, &msg, &status)) {
+            hal.util->persistent_data.last_mavlink_msgid = msg.msgid;
+            packetReceived(status, msg);
+            parsed_packet = true;
+            gcs_alternative_active[chan] = false;
+            alternative.last_mavlink_ms = now_ms;
+            hal.util->persistent_data.last_mavlink_msgid = 0;
+        }
+
+// 3. packetReceived()中调用了 handleMessage()函数
+handleMessage(msg);
+
+// 4. handleMessage()中对包进行判断，如果是手柄数据则进行解包并调用
+// transform_manual_control_to_rc_override()函数
+
+case MAVLINK_MSG_ID_MANUAL_CONTROL: {     // MAV ID: 69
+    if (msg.sysid != sub.g.sysid_my_gcs) {
+        break;    // Only accept control from our gcs
+    }
+    mavlink_manual_control_t packet;
+    mavlink_msg_manual_control_decode(&msg, &packet);
+
+    if (packet.target != sub.g.sysid_this_mav) {
+        break; // only accept control aimed at us
+    }
+
+   		sub.transform_manual_control_to_rc_override(packet.x,packet.y,packet.z,packet.r,packet.buttons);
+
+    sub.failsafe.last_pilot_input_ms = AP_HAL::millis();
+    // a RC override message is considered to be a 'heartbeat'
+    // from the ground station for failsafe purposes
+    gcs().sysid_myggcs_seen(AP_HAL::millis());
+    break;
+}
+
+
+// 5. transform_manual_control_to_rc_override()对按键信息进行处理
+
+// Act if button is pressed
+    // Only act upon pressing button and ignore holding. This provides compatibility with Taranis as joystick.
+for (uint8_t i = 0 ; i < 16 ; i++) {
+    if ((buttons & (1 << i))) {
+        handle_jsbutton_press(i,shift,(buttons_prev & (1 << i)));
+        // buttonDebounce = tnow_ms;
+    } else if (buttons_prev & (1 << i)) {
+        handle_jsbutton_release(i, shift);
+    }
+}
+
+// 6. handle_jsbutton_press()中有对控制模式进行设置
+
+// handle_jsbutton_press()部分代码
+
+case JSButton::button_function_t::k_mode_manual:
+    set_mode(MANUAL, ModeReason::RC_COMMAND);
+    break;
+case JSButton::button_function_t::k_mode_stabilize:
+    set_mode(STABILIZE, ModeReason::RC_COMMAND);
+    break;
+case JSButton::button_function_t::k_mode_depth_hold:
+    set_mode(ALT_HOLD, ModeReason::RC_COMMAND);
+    break;
+case JSButton::button_function_t::k_mode_auto:
+    set_mode(AUTO, ModeReason::RC_COMMAND);
+    break;
+case JSButton::button_function_t::k_mode_guided:
+    set_mode(GUIDED, ModeReason::RC_COMMAND);
+    break;
+case JSButton::button_function_t::k_mode_circle:
+    set_mode(CIRCLE, ModeReason::RC_COMMAND);
+    break;
+case JSButton::button_function_t::k_mode_acro:
+    set_mode(ACRO, ModeReason::RC_COMMAND);
+    break;
+case JSButton::button_function_t::k_mode_poshold:
+    set_mode(POSHOLD, ModeReason::RC_COMMAND);
+    break;
+
+// 7. set_mode() 对对应模式进行初始化工作，并修改当前模式
+
+// 8. 在 fast_loop() 中调用 update_flight_mode() 来进行相应模式的控制
+```
+
+###### 模式运行
+
+在 fast_loop() 中调用 update_flight_mode() 来进行相应模式的控制
+
+##### 定义新的控制模式
+
+###### 添加控制模式名
+
+首先注意在`define.h`中对水下机器人的控制模式进行了枚举
+
+```cpp
+// Auto Pilot Modes enumeration
+enum control_mode_t : uint8_t {
+    STABILIZE =     0,  // manual angle with manual depth/throttle
+    ACRO =          1,  // manual body-frame angular rate with manual depth/throttle
+    ALT_HOLD =      2,  // manual angle with automatic depth/throttle
+    AUTO =          3,  // fully automatic waypoint control using mission commands
+    GUIDED =        4,  // fully automatic fly to coordinate or fly at velocity/direction using GCS immediate commands
+    CIRCLE =        7,  // automatic circular flight with automatic throttle
+    SURFACE =       9,  // automatically return to surface, pilot maintains horizontal control
+    POSHOLD =      16,  // automatic position hold with manual override, with automatic throttle
+    MANUAL =       19,  // Pass-through input with no stabilization
+    MOTOR_DETECT = 20   // Automatically detect motors orientation
+};
+```
+
+定义新的控制模式时首先在枚举类型中添加上控制模式名称
+
+###### 添加相关函数声明
+
+在 `Sub.h` 文件中添加控制模式的两个主体函数，一个是初始化函数，另一个是运行函数。
+
+```cpp
+bool newmode_init(void);
+
+void newmode_run();
+```
+
+###### 编写控制函数
+
+新建一个文件`control_newmode.cpp`
+
+```cpp
+// 具体内容如下：
+#include "sub.h"
+
+bool Sub::newmode_init()
+{
+	/* your code */
+}
+
+void Sub::newmode_run()
+{
+	/* your code */
+}
+```
+
+###### 上层调用函数修改
+
+根据上述模式控制流程的分析，需要修改的上层调用函数包括如下：
+
+```cpp
+1. set_mode()函数
+    增加对应模式的判断和初始化函数调用
+2. update_flight_mode()函数
+    增加对应模式判断和运行函数的调用
+```
+
+###### 添加对应按键控制
+
+在 `AP_JSButton.h`中，有对按键的功能进行枚举，需要添加对应的按键来触发新增的控制模式。
+
+```cpp
+// 部分枚举
+
+k_mode_manual           = 5,            ///< enter enter manual mode
+k_mode_stabilize        = 6,            ///< enter stabilize mode
+k_mode_depth_hold       = 7,            ///< enter depth hold mode
+k_mode_poshold          = 8,            ///< enter poshold mode
+k_mode_auto             = 9,            ///< enter auto mode
+k_mode_circle           = 10,           ///< enter circle mode
+k_mode_guided           = 11,           ///< enter guided mode
+k_mode_acro             = 12,           ///< enter acro mode
+```
+
+除此之外，需要在 `joystick.cpp` 中的 `handle_jsbutton_press()` 中增加新添加的按键功能判断，并调用 `set_mode()` 来设置相应的模式。
