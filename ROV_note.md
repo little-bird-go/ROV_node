@@ -1211,3 +1211,33 @@ k_mode_acro             = 12,           ///< enter acro mode
 ```
 
 除此之外，需要在 `joystick.cpp` 中的 `handle_jsbutton_press()` 中增加新添加的按键功能判断，并调用 `set_mode()` 来设置相应的模式。
+
+#### 姿态控制方法
+
+姿态控制即控制`roll`，`pitch`，`yaw`三个姿态角，每个姿态分别使用的是一个两级的串级`PID`控制器，外环是`P`控制器，内环是`PID`控制器。外环输入期望姿态角，输出期望角速度，作为内环的输入。内环输出的是电机控制量。
+
+外环的实现在不同的控制模式的`mode_run()`函数中，而内环的实现是在姿态控制函数中。
+
+值得注意的是，在内环使用`PID`控制时应用了抗积分饱和的策略，即达到饱和时只有反向的误差才叠加，否则不叠加积分项。
+
+##### 控制流程
+
+```bash
+fast_loop()  # 主循环
+	|--ins.update() -> wait_for_sample()  # 姿态传感器采样
+	|--attitude_control.rate_controller_run()  # 运行姿态控制
+	|					|--update_throttle_rpy_mix()
+	|					|--get_gyro_latest()
+	|					|--set_roll()  # 使用PID计算控制量
+	|					|		|--get_rate_roll_pid().update_all()
+    |					|--set_pitch()  # 使用PID计算控制量
+	|					|		|--get_rate_pitch_pid().update_all()
+    |					|--set_yaw()  # 使用PID计算控制量
+	|					|		|--get_rate_yaw_pid().update_all()
+	|					|--control_monitor_update()
+	|--motor_output()  # 输出控制给电机
+	|		|--output_armed_stabilizing()  # 将各通道油门转化为各电机油门
+	|		|--output_rpyt()  # 将油门值转化为PWM值
+	...
+```
+
