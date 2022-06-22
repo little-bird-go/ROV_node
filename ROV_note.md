@@ -979,7 +979,7 @@ motors_output();
 ###### 自定义推进器结构
 
 ```cpp
-// 1. 在 AP_MotorsDOF.h 中 sub_frame_t 中添加自定义的 推进器结构名 
+// 1. 在 AP_Motors6DOF.h 中 sub_frame_t 中添加自定义的 推进器结构名 
 // Supported frame types
 typedef enum {
     SUB_FRAME_BLUEROV1,
@@ -992,8 +992,9 @@ typedef enum {
     SUB_FRAME_CUSTOM
 } sub_frame_t;
 
-// 2. 在 AP_MotorsDOF.app 中 setup_motors() 中添加对应的 case 并 调用 add_motor_raw_6dof() 添加电机
+// 2. 在 AP_Motors6DOF.cpp 中 setup_motors() 中添加对应的 case 并 调用 add_motor_raw_6dof() 添加电机
 
+// 3. 在 parameters.cpp 中 修改使用的推进器结构
 ```
 
 #### 水下机器人控制模式
@@ -1239,5 +1240,165 @@ fast_loop()  # 主循环
 	|		|--output_armed_stabilizing()  # 将各通道油门转化为各电机油门
 	|		|--output_rpyt()  # 将油门值转化为PWM值
 	...
+```
+
+#### `Mavlink`消息通信
+
+##### 初始化
+
+在`setup()`中，在运行`init_ardupilot()`前有如下几个函数是与`Mavlink`消息相关的
+
+```c++
+// initialise serial manager as early as sensible to get
+// diagnostic output during boot process.  We have to initialise
+// the GCS singleton first as it sets the global mavlink system ID
+// which may get used very early on.
+gcs().init();
+
+// initialise serial ports
+serial_manager.init();
+gcs().setup_console();
+
+// Register scheduler_delay_cb, which will run anytime you have
+// more than 5ms remaining in your call to hal.scheduler->delay
+hal.scheduler->register_delay_callback(scheduler_delay_callback, 5);
+```
+
+根据注释可知，`gcs().init()`是设置了全局参数`system ID`其值为1
+
+```c++
+// 在 CS.cpp 中 gcs().init() 函数定义如下
+void GCS::init()
+{
+    mavlink_system.sysid = sysid_this_mav();
+}
+
+// 在 CS_Sub.cpp ，sysid_this_mav()定义如下
+uint8_t GCS_Sub::sysid_this_mav() const
+{
+    return sub.g.sysid_this_mav;
+}
+
+// 在 arameter.cpp ，设置了sysid_this_mav的值
+GSCALAR(sysid_this_mav, "SYSID_THISMAV",   MAV_SYSTEM_ID)；
+    
+// config.h中，定义了MAV_SYSTEM_ID的值
+#ifndef MAV_SYSTEM_ID
+# define MAV_SYSTEM_ID          1
+#endif
+```
+
+在这之后，建立通信的通道
+
+```c++
+serial_manager.init(); // 初始化了串口
+gcs().setup_console(); // 找到一个可用的串口来作为消息收发的通道
+```
+
+##### 消息接收
+
+消息的接收是一个独立的任务，在任务列表中有注册
+
+```c++
+SCHED_TASK_CLASS(GCS,(GCS*)&sub._gcs,update_receive,400,180,36)；
+```
+
+进入`update_receive`
+
+```c++
+// 循环接收来自每个通道的信息
+void GCS::update_receive(void)
+{
+    for (uint8_t i=0; i<num_gcs(); i++) {
+        chan(i)->update_receive();
+    }
+    // also update UART pass-thru, if enabled
+    update_passthru();
+}
+
+// chan(i)->update_receive()实际执行下面的函数
+GCS_MAVLINK::update_receive(uint32_t max_time_us)；
+
+// 重要的是下面这段，调用函数来解包
+// Try to get a new message
+if (mavlink_parse_char(chan, c, &msg, &status)) {
+    hal.util->persistent_data.last_mavlink_msgid = msg.msgid;
+    packetReceived(status, msg);
+    parsed_packet = true;
+    gcs_alternative_active[chan] = false;
+    alternative.last_mavlink_ms = now_ms;
+    hal.util->persistent_data.last_mavlink_msgid = 0;
+}
+
+// 如果是一个mavlink消息包，则会执行
+packetReceived(status, msg);
+
+// 在这个函数最后调用了消息处理函数
+handleMessage(msg);
+
+// 根据msg.msgid来分别处理不同的消息，一些通用消息处理转入下面函数处理
+handle_common_message(msg);
+```
+
+##### 消息发送
+
+消息的发送也是一个独立的任务，在任务列表中有注册，就在消息接收下面一行
+
+```c++
+SCHED_TASK_CLASS(GCS, (GCS*)&sub._gcs,   update_send,  400, 550,  39),
+```
+
+进入`update_send`
+
+```c++
+// 在一个循环内 分不同消息类型来发送消息
+while (AP_HAL::millis() - start < 5) { // spend a max of 5ms sending messages.
+    ...};
+
+// 调用函数 do_try_send_message()
+// do_try_send_message() 中有调用如下
+if (!try_send_message(id)) {};
+
+// try_send_message(id) 根据不同的 msg_id 来发送消息
+switch(id) {
+
+    case MSG_ATTITUDE:
+        CHECK_PAYLOAD_SIZE(ATTITUDE);
+        send_attitude();
+        break;
+        
+        ...};
+
+// 如 MSG_ATTITUDE 则调用send_attitude()来发送姿态消息
+void GCS_MAVLINK::send_attitude() const
+{
+    const AP_AHRS &ahrs = AP::ahrs();
+    const Vector3f omega = ahrs.get_gyro();
+    mavlink_msg_attitude_send(
+        chan,
+        AP_HAL::millis(),
+        ahrs.roll,
+        ahrs.pitch,
+        ahrs.yaw,
+        omega.x,
+        omega.y,
+        omega.z);
+}    
+```
+
+##### 自定义消息使用
+
+在`modules`文件夹下，有`mavlink`子文件夹，在该文件夹下有`message_definitions/v1.0`文件夹。修改`common.xml`文件，即可实现自定义消息。需要注意的是自定义消息的`id`不能与其他消息产生冲突
+
+```xml
+<!-- 自定义消息参考原有消息定义即可 -->
+<message id="66" name="REQUEST_DATA_STREAM">
+      <description>Request a data stream.</description>
+      <field type="uint8_t" name="target_system">The target requested to send the message stream.</field>
+      <field type="uint8_t" name="target_component">The target requested to send the message stream.</field>
+      <field type="uint8_t" name="req_stream_id">The ID of the requested data stream</field>
+      <field type="uint16_t" name="req_message_rate" units="Hz">The requested message rate</field>
+      <field type="uint8_t" name="start_stop">1 to start sending, 0 to stop sending.</field>
+    </message>
 ```
 
