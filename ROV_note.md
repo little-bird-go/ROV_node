@@ -1213,6 +1213,41 @@ k_mode_acro             = 12,           ///< enter acro mode
 
 除此之外，需要在 `joystick.cpp` 中的 `handle_jsbutton_press()` 中增加新添加的按键功能判断，并调用 `set_mode()` 来设置相应的模式。
 
+```c++
+void Sub::handle_jsbutton_press(uint8_t _button, bool shift, bool held)
+{
+    // ...
+
+    case JSButton::button_function_t::k_mode_manual:
+        set_mode(MANUAL, ModeReason::RC_COMMAND);
+        break;
+    case JSButton::button_function_t::k_mode_stabilize:
+        set_mode(STABILIZE, ModeReason::RC_COMMAND);
+        break;
+    case JSButton::button_function_t::k_mode_depth_hold:
+        set_mode(ALT_HOLD, ModeReason::RC_COMMAND);
+        break;
+    case JSButton::button_function_t::k_mode_auto:
+        set_mode(AUTO, ModeReason::RC_COMMAND);
+        break;
+    case JSButton::button_function_t::k_mode_guided:
+        set_mode(GUIDED, ModeReason::RC_COMMAND);
+        break;
+    case JSButton::button_function_t::k_mode_circle:
+        set_mode(CIRCLE, ModeReason::RC_COMMAND);
+        break;
+    case JSButton::button_function_t::k_mode_acro:
+        set_mode(ACRO, ModeReason::RC_COMMAND);
+        break;
+    case JSButton::button_function_t::k_mode_poshold:
+        set_mode(POSHOLD, ModeReason::RC_COMMAND);
+        break;
+     //   ... 
+}
+```
+
+
+
 #### 姿态控制方法
 
 姿态控制即控制`roll`，`pitch`，`yaw`三个姿态角，每个姿态分别使用的是一个两级的串级`PID`控制器，外环是`P`控制器，内环是`PID`控制器。外环输入期望姿态角，输出期望角速度，作为内环的输入。内环输出的是电机控制量。
@@ -1240,6 +1275,20 @@ fast_loop()  # 主循环
 	|		|--output_armed_stabilizing()  # 将各通道油门转化为各电机油门
 	|		|--output_rpyt()  # 将油门值转化为PWM值
 	...
+	
+	
+# 外环实现，以stabilize_mode为例
+stabilize_run()	# mode control 循环
+	|--attitude_control.input_euler_angle_roll_pitch_euler_rate_yaw()		# 当有偏航角速度时调用，计算得到期望角速度
+						|--_euler_rate_target.x = input_shaping_angle();
+        				|--_euler_rate_target.y = input_shaping_angle();
+        				|--_euler_rate_target.z = input_shaping_ang_vel();
+    |--attitude_control.input_euler_angle_roll_pitch_yaw()					# 当没有偏航角速度时调用，计算得到期望角速度
+						|--_euler_rate_target.x = input_shaping_angle();
+        				|--_euler_rate_target.y = input_shaping_angle();
+        				|--_euler_rate_target.z = input_shaping_ang_vel();
+
+# 以上都是简略的过程，在程序中会有更复杂的实现，但核心内容不变
 ```
 
 #### `Mavlink`消息通信
@@ -1388,7 +1437,7 @@ void GCS_MAVLINK::send_attitude() const
 
 ##### 自定义消息使用
 
-在`modules`文件夹下，有`mavlink`子文件夹，在该文件夹下有`message_definitions/v1.0`文件夹。修改`common.xml`文件，即可实现自定义消息。需要注意的是自定义消息的`id`不能与其他消息产生冲突
+在`modules`文件夹下，有`mavlink`子文件夹，在该文件夹下有`message_definitions/v1.0`文件夹。修改`common.xml`或者`ardupilotmega.xml`文件，即可实现自定义消息。需要注意的是自定义消息的`id`不能与其他消息产生冲突
 
 ```xml
 <!-- 自定义消息参考原有消息定义即可 -->
@@ -1401,4 +1450,94 @@ void GCS_MAVLINK::send_attitude() const
       <field type="uint8_t" name="start_stop">1 to start sending, 0 to stop sending.</field>
     </message>
 ```
+
+修改之后重新编译项目即会自动生成新的`mavlink`消息。参照上述的消息发送和消息接收的函数来实现自定义消息的发送和接收。
+
+#### 在项目中自定义参数
+
+##### 全局参数
+
+1. 在`Parameter.h`中的`Parameter`类的枚举中找到可以添加新参数的空位，添加新的参数
+2. 在枚举下方某处的参数类中声明变量，可能的类型包括`AP_Int8`,`AP_Int16`,`AP_Float`,`AP_Int32`和`AP_Vector3`,变量的名称应与新的枚举相同，但删去`k_param`前缀
+3. 将变量声明添加到`Parameter.cpp`中的`var_info`表中
+4. 将变量的默认值添加到`config.h`中
+
+```c++
+// 1
+enum {
+    k_param_format_version = 0,
+    ...
+    k_param_my_new_parameter,
+    ...
+}
+
+// 2
+AP_Int16 my_new_parameter;
+
+// 3
+// @Param: MY_NEW_PARAMETER
+// @DisplayName: My New Parameter
+// @Description: A discription of my new parameter goes here
+// @Range: -32768 32767
+// @User: Advanced
+GSCALAR(my_new_parameter, "MY_NEW_PARAMETER", MY_NEW_PARAMETER_DEFAULT);  ///注意"MY_NEW_PARAMETER"限制16个字符
+
+// 4
+#ifndef MY_NEW_PARAMETER_DEFAULT
+#define MY_NEW_PARAMETER_DEFAULT 100
+#endif
+```
+
+
+
+##### 库内参数
+
+1. 将新的类变量添加到`top_level`头文件中，类型包括`AP_Int8`,`AP_Int16`,`AP_Float`,`AP_Int32`和`AP_Vector3f`,并为变量添加默认值。
+2. 将变量添加到`.cpp`文件中的`var_info[]`表中
+3. 在`.h`文件中需要添加`var_info[]`的声明
+4. 如果添加的库是自定义的全新的库，需要在`main vehicle`的`var_info[]`表（`Parameter.cpp`中）添加上这个类
+5. 如果添加的库是自定义的全新的库，还需要在`Parameter.h`中添加上枚举
+
+```c++
+// 1
+class Compass {
+public: 
+    Compass();
+    ...
+protected:
+    ...
+    AP_Int16 _my_new_lib_param;
+}
+
+#define MY_NEW_PARAM_DEFAULT 100
+
+// 2
+
+// @Param: MY_NEW_P
+// @DisplayName: My New Library Parameter
+// @Description: A discription of my new library parameter goes here
+// @Range: -32768 32767
+// @User: Advanced
+AP_GROUPINFO("MY_NEW_P", 9, Compass, _my_new_lib_param, MY_NEW_PARAM_DEFAULT);  ///注意"MY_NEW_P"加上前缀限制16个字符， 9是序列，比上一个变量的序列大1
+
+// 3
+static const struct AP_Param::GroupInfo var_info[];
+
+// 4
+
+//@Group COMPASS_
+//@Path ../libraries/AP_Compass/Compass.cpp
+GOBJECT(compass, "COMPASS_", Compass);
+
+// 5
+k_param_my_new_lib
+```
+
+#### 自定义串口驱动
+
+自定义串口驱动有两种不同的方法，一种是直接通过`QGC`软件进行更改，另一种则是参照源码自己重写一个驱动。前者比较简单，但是需要支持对应的协议；后者虽然略显复杂，但是更加灵活，可以依照需求和对应的协议自由更改。
+
+因为前者基本无需更改代码，所以这里主要对第二种方式进行记录。
+
+##### 串口管理库
 
