@@ -1541,3 +1541,87 @@ k_param_my_new_lib
 
 ##### 串口管理库
 
+首先对串口管理库进行简要的说明，该库中主要是对串口的初始化以及寻找空闲串口进行了实现。
+
+```cpp
+// 串口初始化
+
+
+void AP_SerialManager::init()
+{
+    // always reset passthru port2 on boot
+    passthru_port2.set_and_save_ifchanged(-1);
+
+#ifdef HAL_OTG1_CONFIG
+    /*
+      prevent users from changing USB protocol to other than
+      MAVLink. This fixes an issue where users trying to get SLCAN
+      change SERIAL0_PROTOCOL to 22 and find they can no longer connect
+     */
+    if (state[0].protocol != SerialProtocol_MAVLink &&
+        state[0].protocol != SerialProtocol_MAVLink2) {
+        state[0].protocol.set(SerialProtocol_MAVLink2);
+    }
+#endif
+
+    init_console();
+
+    // initialise serial ports
+    for (uint8_t i=1; i<SERIALMANAGER_NUM_PORTS; i++) {
+        auto *uart = hal.serial(i);
+
+        if (uart != nullptr) {
+            set_options(i);
+            switch (state[i].protocol) {
+                case SerialProtocol_None:
+#if HAL_GCS_ENABLED
+                    // disable RX and TX pins in case they are shared
+                    // with another peripheral (eg. RCIN pin). We
+                    // don't do this if GCS is not enabled as in that
+                    // case we don't have serialmanager parameters and
+                    // this would prevent AP_Periph from using a GPS
+                    uart->disable_rxtx();
+#endif
+                    break;
+                case SerialProtocol_Console:
+                case SerialProtocol_MAVLink:
+                case SerialProtocol_MAVLink2:
+                    uart->begin(map_baudrate(state[i].baud), 
+                                         AP_SERIALMANAGER_MAVLINK_BUFSIZE_RX,
+                                         AP_SERIALMANAGER_MAVLINK_BUFSIZE_TX);
+                    break;
+				...
+            }
+        }
+    }
+}
+
+
+// 寻找空闲串口
+
+// find_serial - searches available serial ports for the first instance that allows the given protocol
+//  instance should be zero if searching for the first instance, 1 for the second, etc
+//  returns uart on success, nullptr if a serial port cannot be found
+AP_HAL::UARTDriver *AP_SerialManager::find_serial(enum SerialProtocol protocol, uint8_t instance) const
+{
+    const struct UARTState *_state = find_protocol_instance(protocol, instance);
+    if (_state == nullptr) {
+        return nullptr;
+    }
+    const uint8_t serial_idx = _state - &state[0];
+
+    // set options before any user does begin()
+    AP_HAL::UARTDriver *port = hal.serial(serial_idx);
+    if (port) {
+        port->set_options(_state->options);
+    }
+    return port;
+}
+```
+
+根据上面的串口初始化函数可以看出，其实针对不同串口的通信协议和波特率来进行初始设置。寻找空闲串口实际也是通过串口的协议来进行一个匹配和寻找。了解到这些信息后，就能有一个大概的方向来自定义串口的驱动了——首先可以自定义串口的协议，通过该协议来寻找空闲的串口，并对串口进行初始化，设置好通信的波特率。
+
+##### 实际过程
+
+后续有实际的修改经验后再补充。
+
