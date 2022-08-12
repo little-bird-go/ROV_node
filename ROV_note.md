@@ -1291,6 +1291,23 @@ stabilize_run()	# mode control 循环
 # 以上都是简略的过程，在程序中会有更复杂的实现，但核心内容不变
 ```
 
+#### 位置控制方法
+
+主要是定深控制的实现。定深控制其实是一个三级的串级PID控制，最外环为位置环，和姿态控制一样是一个开方控制器; 中间环为速度环，最内环为加速度环。
+
+##### 控制流程
+
+```c++
+althold_run()
+	|--control_depth()
+		|--pos_control.update_z_controller()
+			|--_vel_target.z = _p_pos_z.update_all(pos_target_zf, _inav.get_position_z_up_cm())
+			|--_accel_target.z = _pid_vel_z.update_all(_vel_target.z, curr_vel.z, _motors.limit.throttle_lower, _motors.limit.throttle_upper);
+			|--thr_out = _pid_accel_z.update_all(_accel_target.z, z_accel_meas, (_motors.limit.throttle_lower || _motors.limit.throttle_upper)) * 0.001f;
+```
+
+核心就是以上几个函数，但其实还有诸如速度零点判断，前馈控制的应用，以及各种限制条件等等，实际的实现要负杂得多。
+
 #### `Mavlink`消息通信
 
 ##### 初始化
